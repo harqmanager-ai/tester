@@ -10,8 +10,9 @@ The complete homepage is `index.html`, including navigation, hero, About, Servic
 - `styles.css` — layout, responsive styles, and brand colours.
 - `script.js` — mobile navigation and email enquiry interactions.
 - `assets/` — locally hosted website images.
-- `scripts/` — optional local packaging and future deployment helpers; not part of the public website.
-- `deployment/` — inactive DreamHost deployment template and instructions; not part of the public website.
+- `scripts/` — local packaging and guarded rsync deployment helpers; not part of the public website.
+- `.github/workflows/deploy-dreamhost.yml` — automatic deployment workflow, gated until credentials are ready.
+- `deployment/` — DreamHost setup and secret instructions; not part of the public website.
 
 The architectural hero image is generated artwork, hosted locally as an optimised JPEG. Fonts are supplied by the visitor’s system, and icons are inline SVGs, so the site makes no third-party requests.
 
@@ -30,7 +31,7 @@ Then open `http://localhost:8000` in your browser. Stop the server with `Ctrl+C`
 
 The intended website address is **https://harqtest1.online/**. This repository does not configure the domain, DNS, SSL certificates, hosting account, or email, and does not establish that the website is currently published.
 
-When deployment is separately authorised, upload only these website files to the domain's existing, verified web directory:
+The deployment workflow targets `/home/dh_gv6t5g/harqtest1.online/` on `iad1-shared-e1-06.dreamhost.com` over SSH port `22` as `dh_gv6t5g`. It uploads only these website files:
 
 ```text
 index.html
@@ -41,15 +42,17 @@ assets/
   hero.jpg
 ```
 
-Keep `index.html` directly inside the web directory. Verify the actual directory in the DreamHost account rather than assuming a server path from the domain name. Keep `.git/`, `README.md`, `scripts/`, `deployment/`, and credentials outside the public web directory.
+Keep `index.html` directly inside the web directory. The workflow keeps `.git/`, `.github/`, README files, `scripts/`, `deployment/`, and credentials outside the public web directory. It preserves the existing `.htaccess` and does not delete existing server files.
 
 No Node.js process, database, or WordPress installation is needed. Future changes can be uploaded as updated static files.
 
-## Future automatic deployment — inactive
+## Automatic deployment — awaiting credentials
 
-The optional [DreamHost deployment preparation](deployment/README.md) packages only public website files and provides an inactive GitHub Actions template for a future SFTP deployment. Packaging copies the existing static files; it is optional and does not compile or build the website.
+The [DreamHost deployment instructions](deployment/README.md) describe the GitHub Actions workflow and secure SSH setup. It uses **rsync over SSH** on pushes to `main`, with no website build step. Packaging only copies the existing static files.
 
-**No deployment credentials or repository secrets have been configured. No deployment workflow is active, and pushing this repository does not publish the website.** The template is stored outside `.github/workflows/` so that it cannot run until deliberately enabled in a future deployment task. No DreamHost account changes are part of this setup.
+Configure the two repository secrets **`DREAMHOST_SSH_PRIVATE_KEY`** and **`DREAMHOST_KNOWN_HOSTS`**, then set the repository variable **`DREAMHOST_DEPLOY_ENABLED=true`** only after SSH authentication is ready. Leave that variable unset or false until then. Without it, the deployment job is skipped; missing or malformed secrets stop it before any SSH connection.
+
+**No credentials or enable flag have been configured, no DreamHost connection/deployment has been attempted, and no DreamHost account settings have been changed by this preparation.** After setup, a new push to `main` or a manual workflow run on `main` starts deployment. See [deployment/README.md](deployment/README.md) for the exact secret values required, SSH shell/remote-rsync prerequisites, and preservation rules.
 
 GitHub Pages is not used. Its previous `.nojekyll` marker has been removed; there is no Pages workflow or domain configuration.
 

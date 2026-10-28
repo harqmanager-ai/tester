@@ -1,0 +1,78 @@
+name: Deploy Harq Media to DreamHost
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dreamhost-harqtest1-online
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # Enable this repository variable only after both secrets and the matching
+    # authorised public key on DreamHost are configured.
+    if: ${{ github.ref == 'refs/heads/main' && vars.DREAMHOST_DEPLOY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DREAMHOST_DEPLOY_ENABLED: ${{ vars.DREAMHOST_DEPLOY_ENABLED }}
+      DREAMHOST_HOST: iad1-shared-e1-06.dreamhost.com
+      DREAMHOST_USER: dh_gv6t5g
+      DREAMHOST_PORT: '22'
+      DREAMHOST_WEB_ROOT: /home/dh_gv6t5g/harqtest1.online/
+    steps:
+      - name: Check out website
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Require both deployment secrets
+        env:
+          DREAMHOST_SSH_PRIVATE_KEY: ${{ secrets.DREAMHOST_SSH_PRIVATE_KEY }}
+          DREAMHOST_KNOWN_HOSTS: ${{ secrets.DREAMHOST_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$DREAMHOST_SSH_PRIVATE_KEY" || -z "$DREAMHOST_KNOWN_HOSTS" ]]; then
+            echo '::error::Configure DREAMHOST_SSH_PRIVATE_KEY and DREAMHOST_KNOWN_HOSTS before enabling deployment.'
+            exit 1
+          fi
+
+      - name: Prepare static website files
+        run: bash scripts/prepare-site.sh "$RUNNER_TEMP/harqmedia-site"
+
+      - name: Ensure rsync and SSH are available
+        run: |
+          set -euo pipefail
+          if ! command -v rsync >/dev/null || ! command -v ssh >/dev/null || ! command -v ssh-keygen >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends rsync openssh-client
+          fi
+
+      - name: Verify SSH credentials and deploy with rsync
+        env:
+          DREAMHOST_SSH_PRIVATE_KEY: ${{ secrets.DREAMHOST_SSH_PRIVATE_KEY }}
+          DREAMHOST_KNOWN_HOSTS: ${{ secrets.DREAMHOST_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ssh_dir=$(mktemp -d "$RUNNER_TEMP/harqmedia-ssh.XXXXXX")
+          trap 'rm -f -- "$ssh_dir/id_deploy" "$ssh_dir/known_hosts" "$ssh_dir/matched_hosts"; rmdir -- "$ssh_dir"' EXIT
+          export DREAMHOST_SSH_KEY_FILE="$ssh_dir/id_deploy"
+          export DREAMHOST_KNOWN_HOSTS_FILE="$ssh_dir/known_hosts"
+          printf '%s\n' "$DREAMHOST_SSH_PRIVATE_KEY" | tr -d '\r' > "$DREAMHOST_SSH_KEY_FILE"
+          printf '%s\n' "$DREAMHOST_KNOWN_HOSTS" | tr -d '\r' > "$DREAMHOST_KNOWN_HOSTS_FILE"
+          unset DREAMHOST_SSH_PRIVATE_KEY DREAMHOST_KNOWN_HOSTS
+          # Local validation only; do not connect if either secret is invalid.
+          ssh-keygen -y -P '' -f "$DREAMHOST_SSH_KEY_FILE" > /dev/null
+          ssh-keygen -l -f "$DREAMHOST_KNOWN_HOSTS_FILE" > /dev/null
+          if ! ssh-keygen -F "$DREAMHOST_HOST" -f "$DREAMHOST_KNOWN_HOSTS_FILE" > "$ssh_dir/matched_hosts"; then
+            echo '::error::DREAMHOST_KNOWN_HOSTS must pin the verified key for the configured DreamHost hostname.'
+            exit 1
+          fi
+          ssh-keygen -l -f "$ssh_dir/matched_hosts" > /dev/null
+          bash scripts/deploy-dreamhost.sh --deploy "$RUNNER_TEMP/harqmedia-site"

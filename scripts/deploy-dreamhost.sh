@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Future opt-in uploader. Never invoked by a committed active workflow.
+# Opt-in rsync uploader. No connection is made until all prerequisites pass.
 set -euo pipefail
 
 if [[ ${1:-} == --help ]]; then
@@ -32,13 +32,13 @@ if [[ ! $port =~ ^[0-9]{1,5}$ ]] || (( 10#$port < 1 || 10#$port > 65535 )); then
   printf 'DREAMHOST_PORT must be between 1 and 65535.\n' >&2
   exit 2
 fi
-if [[ ! -s $DREAMHOST_SSH_KEY_FILE || ! -s $DREAMHOST_KNOWN_HOSTS_FILE ]]; then
+if [[ ! -f $DREAMHOST_SSH_KEY_FILE || ! -s $DREAMHOST_SSH_KEY_FILE || ! -f $DREAMHOST_KNOWN_HOSTS_FILE || ! -s $DREAMHOST_KNOWN_HOSTS_FILE ]]; then
   printf 'An existing SSH key file and verified known_hosts file are required.\n' >&2
   exit 2
 fi
 site_dir=$(cd -- "$2" && pwd -P)
 for file in index.html styles.css script.js; do
-  if [[ ! -s "$site_dir/$file" || -L "$site_dir/$file" ]]; then
+  if [[ ! -f "$site_dir/$file" || ! -s "$site_dir/$file" || -L "$site_dir/$file" ]]; then
     printf 'The prepared site is missing a regular nonempty %s file.\n' "$file" >&2
     exit 2
   fi
@@ -51,23 +51,52 @@ if [[ $site_dir == *$'\n'* || $site_dir == *$'\r'* ]]; then
   printf 'The local site path cannot contain line breaks.\n' >&2
   exit 2
 fi
-# Escape the local path for the SFTP batch parser; no remote shell is used.
-quoted_site=${site_dir//\\/\\\\}
-quoted_site=${quoted_site//\"/\\\"}
-batch_file=$(mktemp "${TMPDIR:-/tmp}/harqmedia-sftp.XXXXXX")
-trap 'rm -f -- "$batch_file"' EXIT
-cat > "$batch_file" <<EOF
-lcd "$quoted_site"
-cd "$remote_dir"
-put styles.css
-put script.js
-put -r assets
-put index.html
-EOF
+if ! command -v rsync >/dev/null || ! command -v ssh >/dev/null; then
+  printf 'The deployment runner needs rsync and OpenSSH.\n' >&2
+  exit 2
+fi
 
-# Fail closed on unknown/changed host keys. Never delete existing remote files.
-sftp -b "$batch_file" -i "$DREAMHOST_SSH_KEY_FILE" -P "$port" \
-  -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+# A wrapper passes each SSH option as a separate argument, including key paths
+# containing spaces. No credentials or remote shell commands are written here.
+ssh_dir=$(mktemp -d "${TMPDIR:-/tmp}/harqmedia-ssh.XXXXXX")
+trap 'rm -rf -- "$ssh_dir"' EXIT
+ssh_wrapper="$ssh_dir/ssh"
+cat > "$ssh_wrapper" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exec ssh -F /dev/null -p "$DREAMHOST_PORT" -i "$DREAMHOST_SSH_KEY_FILE" \
+  -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none \
+  -o StrictHostKeyChecking=yes -o UpdateHostKeys=no \
   -o "UserKnownHostsFile=$DREAMHOST_KNOWN_HOSTS_FILE" \
+  -o GlobalKnownHostsFile=/dev/null \
   -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no \
-  "$DREAMHOST_USER@$DREAMHOST_HOST"
+  -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 \
+  "$@"
+EOF
+chmod 700 "$ssh_wrapper"
+export DREAMHOST_PORT="$port" DREAMHOST_SSH_KEY_FILE DREAMHOST_KNOWN_HOSTS_FILE
+# rsync's remote-shell parser uses doubled quotes for literal quote characters.
+ssh_command="\"${ssh_wrapper//\"/\"\"}\""
+destination="$DREAMHOST_USER@$DREAMHOST_HOST:$remote_dir/"
+
+# Exclusions must precede the assets allowlist, including for nested files.
+# There is deliberately no --delete or --delete-excluded option: existing
+# remote files stay in place, and .htaccess is never sent or overwritten.
+rsync_options=(
+  --recursive --times --perms --chmod=D755,F644 --compress --delay-updates
+  --rsh="$ssh_command"
+  --exclude='.htaccess'
+  --exclude='.git' --exclude='.github'
+  --exclude='[Rr][Ee][Aa][Dd][Mm][Ee]*'
+  --exclude='scripts/' --exclude='deployment/'
+)
+
+# Publish dependencies before the homepage. Only these public paths can pass,
+# even if the supplied source folder contains repository or deployment files.
+rsync "${rsync_options[@]}" \
+  --include='/styles.css' --include='/script.js' \
+  --include='/assets/' --include='/assets/***' --exclude='*' \
+  "$site_dir/" "$destination"
+rsync "${rsync_options[@]}" \
+  --include='/index.html' --exclude='*' \
+  "$site_dir/" "$destination"
